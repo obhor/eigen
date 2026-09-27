@@ -236,6 +236,15 @@ export class Toolbar {
     const activeTab = this.app.tabManager.getActiveTab();
     if (!activeTab) return;
 
+    // Virtualized pages must all be rendered for print.
+    // ponytail: materialize-all for print; chunked print canvas if a 500-page print ever OOMs
+    await this.app.pdfRenderer.materializeAll(activeTab.id);
+    const sweep = () => {
+      window.removeEventListener('afterprint', sweep);
+      this.app.pdfRenderer.dematerializeOffscreen(activeTab.id);
+    };
+    window.addEventListener('afterprint', sweep);
+
     window.print();
   }
 

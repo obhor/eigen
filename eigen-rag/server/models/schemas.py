@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
 
 
 class IngestRequest(BaseModel):
@@ -23,13 +23,20 @@ class IngestResponse(BaseModel):
     message:     str
 
 
+class Turn(BaseModel):
+    role:    Literal["user", "assistant"]   # never "system" — rules stay server-side
+    content: str
+
+
 class QueryRequest(BaseModel):
     doc_id: str
     q:      str
-    k:      int = 5
+    k:      int = Field(default=5, ge=1, le=20)
+    history: List[Turn] = Field(default_factory=list)  # capped in generator._messages
 
 
 class QueryResponse(BaseModel):
-    answer:  str
-    sources: List[Chunk]
-    mock:    bool = False   # True when AI_ENABLED=false
+    answer:   str
+    sources:  List[Chunk]
+    mock:     bool = False   # True when AI_ENABLED=false
+    warnings: List[str] = Field(default_factory=list)  # citation-check notes

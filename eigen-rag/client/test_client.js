@@ -13,6 +13,7 @@ import fs from 'fs';
 import path from 'path';
 
 const BASE = process.env.RAG_BASE ?? 'http://localhost:8000';
+const AUTH_HEADERS = process.env.RAG_TOKEN ? { Authorization: `Bearer ${process.env.RAG_TOKEN}` } : {};
 
 async function status() {
   const res = await fetch(`${BASE}/status`);
@@ -29,7 +30,7 @@ async function ingest(filePath) {
   form.append('file', new Blob([bytes], { type: 'application/pdf' }), filename);
 
   console.log(`Ingesting: ${filename} (${bytes.length} bytes)...`);
-  const res = await fetch(`${BASE}/ingest`, { method: 'POST', body: form });
+  const res = await fetch(`${BASE}/ingest`, { method: 'POST', headers: AUTH_HEADERS, body: form });
   const data = await res.json();
 
   if (!res.ok) {
@@ -46,7 +47,7 @@ async function query(docId, question, k = 5) {
   console.log(`Querying doc ${docId}: "${question}"`);
   const res = await fetch(`${BASE}/query`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
     body: JSON.stringify({ doc_id: docId, q: question, k }),
   });
   const data = await res.json();

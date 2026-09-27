@@ -5,6 +5,9 @@ dist/
 .DS_Store
 .env
 .cache/
+__pycache__/
+*.pyc
+.venv/
 
 # Ignore OS files
 Thumbs.db

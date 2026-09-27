@@ -6,7 +6,7 @@ import { AnnotationManager } from './js/AnnotationManager.js';
 import { SearchManager } from './js/SearchManager.js';
 import { SettingsManager } from './js/SettingsManager.js';
 import { AIChatPanel } from './js/AIChatPanel.js';
-import { RagManager } from '../../eigen-rag/client/RagManager.js';
+import { RagManager } from '../eigen-rag/client/RagManager.js';
 
 class PDFEditor {
   constructor() {
@@ -274,8 +274,7 @@ class PDFEditor {
     this.pdfRenderer.switchToTab(tabId);
     this.toolbar.restoreTabState(tab);
     this.sidebar.restoreTabState(tab);
-    this.annotationManager.switchToTab(tabId);
-    
+
     this.updateUI();
   }
 
@@ -320,17 +319,10 @@ class PDFEditor {
   }
 
   showEmptyState() {
-    const viewer = document.getElementById('pdf-viewer');
-    viewer.innerHTML = `
-      <div class="empty-state">
-        <p>Open a PDF to get started</p>
-        <button id="btn-open-file" class="open-file-btn">Open File</button>
-      </div>
-    `;
-    
-    document.getElementById('btn-open-file').addEventListener('click', () => {
-      this.openFile();
-    });
+    // The empty state is a single static node; tab viewers are hidden, not removed.
+    this.pdfRenderer.hideAllTabViewers();
+    const emptyState = document.querySelector('#pdf-viewer .empty-state');
+    if (emptyState) emptyState.style.display = 'flex';
 
     document.getElementById('page-total').textContent = 'of 0';
     document.getElementById('page-number').value = 1;

@@ -22,7 +22,6 @@ export class TabManager {
       activeTool: null,
       sidebarOpen: false,
       sidebarMode: 'outline',
-      annotations: [],
       hasChanges: false,
       scrollPosition: 0
     };

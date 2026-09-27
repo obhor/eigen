@@ -110,7 +110,7 @@ export class SearchManager {
     this.updateResultsLabel();
   }
 
-  highlightCurrentResult() {
+  async highlightCurrentResult() {
     if (this.currentResultIndex < 0 || this.currentResultIndex >= this.searchResults.length) {
       return;
     }
@@ -119,8 +119,8 @@ export class SearchManager {
     const activeTab = this.app.tabManager.getActiveTab();
     if (!activeTab) return;
 
-    // Navigate to page
-    this.app.pdfRenderer.goToPage(activeTab.id, result.page);
+    // Navigate to page; goToPage materializes it, so the spans below exist.
+    await this.app.pdfRenderer.goToPage(activeTab.id, result.page);
 
     // Clear previous selection highlighting
     this.clearSelectionHighlight();
@@ -132,14 +132,23 @@ export class SearchManager {
     this.addSelectionHighlight(result.page);
   }
 
+  /** Active tab's viewer — hidden tabs' page containers must never match. */
+  activeViewer() {
+    const tab = this.app.tabManager.getActiveTab();
+    return (tab && this.app.pdfRenderer.getTabViewer(tab.id)) || null;
+  }
+
+  textLayerFor(pageNum) {
+    const viewer = this.activeViewer();
+    const pageContainer = viewer?.querySelector(`.page-container[data-page="${pageNum}"]`);
+    return pageContainer?.querySelector('.text-layer') || null;
+  }
+
   highlightTextInPage(pageNum) {
     const query = this.searchInput.value.trim().toLowerCase();
     if (!query) return;
 
-    const pageContainer = document.querySelector(`.page-container[data-page="${pageNum}"]`);
-    if (!pageContainer) return;
-
-    const textLayer = pageContainer.querySelector('.text-layer');
+    const textLayer = this.textLayerFor(pageNum);
     if (!textLayer) return;
 
     const textSpans = textLayer.querySelectorAll('span');
@@ -155,10 +164,7 @@ export class SearchManager {
     const query = this.searchInput.value.trim().toLowerCase();
     if (!query) return;
 
-    const pageContainer = document.querySelector(`.page-container[data-page="${pageNum}"]`);
-    if (!pageContainer) return;
-
-    const textLayer = pageContainer.querySelector('.text-layer');
+    const textLayer = this.textLayerFor(pageNum);
     if (!textLayer) return;
 
     const textSpans = textLayer.querySelectorAll('span.search-highlight');
@@ -177,7 +183,7 @@ export class SearchManager {
   }
 
   clearSelectionHighlight() {
-    const selectedSpans = document.querySelectorAll('.text-layer span.search-selected');
+    const selectedSpans = this.activeViewer()?.querySelectorAll('.text-layer span.search-selected') || [];
     selectedSpans.forEach(span => {
       span.style.backgroundColor = 'rgba(255, 255, 0, 0.4)';
       span.classList.remove('search-selected');
@@ -185,7 +191,7 @@ export class SearchManager {
   }
 
   clearHighlights() {
-    const textSpans = document.querySelectorAll('.text-layer span');
+    const textSpans = this.activeViewer()?.querySelectorAll('.text-layer span') || [];
     textSpans.forEach(span => {
       span.style.backgroundColor = '';
       span.classList.remove('search-highlight', 'search-selected');

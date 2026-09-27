@@ -10,9 +10,19 @@ Two-pass on single doc handle — no re-opening per page.
 import fitz
 import io
 import logging
+import os
 from typing import List, Dict
 
 log = logging.getLogger("eigen-rag")
+
+# OCR is a last resort: cap how many pages per ingest may hit Tesseract and
+# kill any single page that runs long. RAG_OCR_MAX_PAGES=0 disables OCR.
+OCR_MAX_PAGES = int(os.getenv("RAG_OCR_MAX_PAGES", "50"))
+OCR_TIMEOUT_S = float(os.getenv("RAG_OCR_TIMEOUT_S", "30"))
+
+
+class EncryptedPdfError(Exception):
+    """PDF needs a password the server cannot supply."""
 
 
 # ── Tesseract fallback ────────────────────────────────────────────────────────
@@ -23,9 +33,13 @@ def _ocr_page(page: fitz.Page) -> str:
         mat = fitz.Matrix(250 / 72, 250 / 72)
         pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
         img = Image.open(io.BytesIO(pix.tobytes("png")))
-        return pytesseract.image_to_string(img, lang="eng").strip()
+        # timeout kills the tesseract subprocess if the page is pathological
+        return pytesseract.image_to_string(img, lang="eng", timeout=OCR_TIMEOUT_S).strip()
     except ImportError:
         log.warning("pytesseract not installed — scanned page will be skipped")
+        return ""
+    except Exception as e:
+        log.warning("OCR failed: %s: %s", type(e).__name__, e)
         return ""
 
 
@@ -80,7 +94,7 @@ def _extract_page_blocks(page: fitz.Page) -> Dict:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-def extract_pages(pdf_bytes: bytes) -> List[Dict]:
+def extract_pages(pdf_bytes: bytes, max_pages: int | None = None) -> List[Dict]:
     """
     Returns list of:
       { page: int, text: str, heading: str|None, source_type: 'digital'|'ocr' }
@@ -88,28 +102,53 @@ def extract_pages(pdf_bytes: bytes) -> List[Dict]:
     Two-pass on single doc handle:
       Pass 1 — cheap get_text("text") to detect empty/scanned pages
       Pass 2 — get_text("blocks") only on pages that have text
+
+    Raises ValueError when the document exceeds max_pages, so OCR/embedding
+    work is never started on oversized input; EncryptedPdfError when the PDF
+    needs a password the server does not have. A page that fails to extract
+    is logged and skipped rather than sinking the whole document.
     """
-    doc       = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages_out = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        # Owner-password-only PDFs (the common "restricted" case) open with ""
+        if doc.needs_pass and not doc.authenticate(""):
+            raise EncryptedPdfError("PDF is password-protected")
 
-    for i, page in enumerate(doc):
-        page_num = i + 1
+        if max_pages is not None and doc.page_count > max_pages:
+            raise ValueError(f"PDF has {doc.page_count} pages; the limit is {max_pages}")
 
-        # Pass 1: cheap empty-page detection
-        raw = page.get_text("text").strip()
+        pages_out = []
+        ocr_left = OCR_MAX_PAGES  # per-ingest Tesseract budget; 0 = disabled
 
-        if raw:
-            # Pass 2: fast structured extraction
-            result = _extract_page_blocks(page)
-        else:
-            log.info(f"Page {page_num}: no text layer — falling back to Tesseract OCR")
-            ocr_text = _ocr_page(page)
-            result = {"text": ocr_text, "heading": None, "source_type": "ocr"}
+        for i, page in enumerate(doc):
+            page_num = i + 1
+            try:
+                # Pass 1: cheap empty-page detection
+                raw = page.get_text("text").strip()
 
-        if result["text"].strip():
-            pages_out.append({"page": page_num, **result})
-        else:
-            log.warning(f"Page {page_num}: no text extracted (skipped)")
+                if raw:
+                    # Pass 2: fast structured extraction
+                    result = _extract_page_blocks(page)
+                elif OCR_MAX_PAGES == 0:
+                    log.info("Page %d: no text layer — OCR disabled (RAG_OCR_MAX_PAGES=0)", page_num)
+                    result = {"text": "", "heading": None, "source_type": "ocr"}
+                elif ocr_left <= 0:
+                    log.warning("Page %d: no text layer — OCR budget (%d pages) used up",
+                                page_num, OCR_MAX_PAGES)
+                    result = {"text": "", "heading": None, "source_type": "ocr"}
+                else:
+                    log.info("Page %d: no text layer — falling back to Tesseract OCR", page_num)
+                    ocr_left -= 1
+                    result = {"text": _ocr_page(page), "heading": None, "source_type": "ocr"}
+            except Exception as e:
+                log.warning("Page %d: extraction failed: %s: %s", page_num, type(e).__name__, e)
+                continue
 
-    doc.close()
-    return pages_out
+            if result["text"].strip():
+                pages_out.append({"page": page_num, **result})
+            else:
+                log.warning("Page %d: no text extracted (skipped)", page_num)
+
+        return pages_out
+    finally:
+        doc.close()

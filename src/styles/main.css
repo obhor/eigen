@@ -605,6 +605,15 @@ body.dark-mode .pdf-container {
   position: relative;
 }
 
+/* One per open tab; page-flow styles are applied inline by PDFRenderer.applyLayout. */
+.tab-viewer {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
 .empty-state {
   position: fixed;
   top: 50%;
@@ -674,10 +683,6 @@ body.dark-mode .pdf-container {
   right: 0;
   bottom: 0;
   pointer-events: none;
-}
-
-.annotation-layer canvas {
-  pointer-events: all;
 }
 
 .two-page-layout {
@@ -1373,12 +1378,14 @@ body.dark-mode .highlight-popover .divider {
   background: #222;
 }
 
+/* The pdf.js / Firefox selection blue. Translucent on purpose: the glyphs come
+   from the canvas underneath, so an opaque highlight would hide the text. */
 .text-layer span::selection {
-  background: #cce6ff80 !important;
+  background: rgba(0, 100, 255, 0.45) !important;
   border-radius: 3px;
 }
 .text-layer span::-moz-selection {
-  background: #cce6ff80 !important;
+  background: rgba(0, 100, 255, 0.45) !important;
   border-radius: 3px;
 }
 
@@ -1500,13 +1507,21 @@ body.dark-mode .highlight-popover .divider {
   border: 1px solid #444;
 }
 
-/* Draw Overlay Canvas - sits on top of PDF */
-.draw-overlay-canvas {
+/* Annotation canvases - lazily created per page, on top of the PDF */
+.annotation-canvas {
   position: absolute;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
+}
+
+.annotation-canvas.highlight-layer {
+  pointer-events: none;
+  z-index: 9;
+}
+
+.annotation-canvas.draw-layer {
   pointer-events: auto !important;
   z-index: 10;
 }
@@ -1551,17 +1566,24 @@ body.eraser-tool-active #pdf-container {
   cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="red" stroke-width="2" stroke-dasharray="3 2"/></svg>') 12 12, crosshair !important;
 }
 
-/* Highlight Tool Active State */
+/* Highlight Tool Active State — freehand mode drags the canvas, so the text
+   layer must stay out of the way (a selectable text layer made every stroke
+   select text underneath it as well). Text-only mode re-enables it below. */
 body.highlight-tool-active .annotation-layer {
-  pointer-events: none !important;
+  pointer-events: auto !important;
 }
 
 body.highlight-tool-active .text-layer {
-  pointer-events: auto !important;
-  user-select: text !important;
-  -webkit-user-select: text !important;
-  -moz-user-select: text !important;
+  pointer-events: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
   z-index: 5;
+}
+
+/* drag-to-draw, so no I-beam (text-only mode keeps the text cursor) */
+body.highlight-tool-active:not(.text-only-mode) #pdf-container {
+  cursor: crosshair !important;
 }
 
 /* When text-only mode is active, enable text selection */
@@ -1962,6 +1984,112 @@ body.dark-mode .ai-chat-close:hover {
 body.dark-mode .ai-chat-bubble.assistant {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-dark);
+}
+
+.ai-chat-bubble.status,
+.ai-chat-bubble.system {
+  align-self: stretch;
+  background: transparent;
+  border: 1px dashed var(--border-light);
+  color: var(--text-light);
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+body.dark-mode .ai-chat-bubble.status,
+body.dark-mode .ai-chat-bubble.system {
+  border-color: var(--border-dark);
+  color: var(--text-dark);
+}
+
+.ai-chat-bubble.status.cancelled {
+  font-style: italic;
+}
+
+.ai-chat-bubble.error {
+  color: #b13c38;
+  border: 1px solid rgba(217, 83, 79, 0.45);
+}
+
+.ai-chat-cancel {
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ai-chat-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ai-chat-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(217, 83, 79, 0.15);
+  color: #b13c38;
+}
+
+.ai-chat-badge.mock {
+  background: rgba(120, 120, 120, 0.18);
+  color: inherit;
+}
+
+.ai-chat-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-chat-sources-label {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.ai-chat-source-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ai-chat-source-chip:hover {
+  background: var(--hover-light);
+}
+
+body.dark-mode .ai-chat-source-chip {
+  border-color: var(--border-dark);
+}
+
+body.dark-mode .ai-chat-source-chip:hover {
+  background: var(--hover-dark);
+}
+
+.ai-chat-warning {
+  margin-top: 6px;
+  font-size: 11px;
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.ai-chat-hint {
+  font-size: 12px;
+  opacity: 0.6;
+  padding: 4px 2px;
 }
 
 .ai-chat-input {

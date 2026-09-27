@@ -123,12 +123,4 @@ export class DrawingEngine {
     // Reset to default
     this.ctx.globalCompositeOperation = 'source-over';
   }
-
-  /**
-   * Redraw multiple paths
-   */
-  redrawPaths(paths) {
-    this.clear();
-    paths.forEach(path => this.drawPath(path));
-  }
 }

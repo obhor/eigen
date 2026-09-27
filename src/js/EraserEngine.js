@@ -1,21 +1,10 @@
 /**
  * Eraser Engine
- * Handles erasing drawn paths from the overlay canvas
+ * Hit-tests stored paths against the eraser circle; repaint is the caller's job.
  */
 export class EraserEngine {
   constructor() {
-    this.isErasing = false;
     this.eraserRadius = 20; // Default eraser size
-    this.overlayCanvas = null;
-    this.ctx = null;
-  }
-
-  /**
-   * Initialize eraser on a specific canvas
-   */
-  initCanvas(overlayCanvas) {
-    this.overlayCanvas = overlayCanvas;
-    this.ctx = overlayCanvas.getContext('2d');
   }
 
   /**
@@ -33,48 +22,7 @@ export class EraserEngine {
   }
 
   /**
-   * Start erasing at a point
-   */
-  startErasing(x, y) {
-    if (!this.ctx) return;
-    
-    this.isErasing = true;
-    this.eraseAt(x, y);
-  }
-
-  /**
-   * Continue erasing (mouse move)
-   */
-  continueErasing(x, y) {
-    if (!this.isErasing || !this.ctx) return;
-    
-    this.eraseAt(x, y);
-  }
-
-  /**
-   * Stop erasing
-   */
-  stopErasing() {
-    this.isErasing = false;
-  }
-
-  /**
-   * Erase at a specific point
-   */
-  eraseAt(x, y) {
-    if (!this.ctx) return;
-    
-    // Use destination-out to erase
-    this.ctx.globalCompositeOperation = 'destination-out';
-    this.ctx.beginPath();
-    this.ctx.arc(x, y, this.eraserRadius, 0, Math.PI * 2);
-    this.ctx.fill();
-    this.ctx.globalCompositeOperation = 'source-over';
-  }
-
-  /**
-   * Erase paths that intersect with eraser
-   * Returns array of paths that should be kept (not erased)
+   * Split paths into surviving/erased by eraser intersection.
    */
   erasePaths(paths, x, y) {
     const survivingPaths = [];

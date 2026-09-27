@@ -141,83 +141,47 @@ export class TextTool {
     });
   }
 
+  /** Store item backing a mounted wrapper, if any. */
+  itemFor(wrapper) {
+    const { annotationId: id, tabId } = wrapper?.dataset || {};
+    return id && tabId ? this.annotationManager.storeFor(tabId).get(id) : null;
+  }
+
+  projectorFor(wrapper) {
+    const layer = wrapper.closest('.annotation-layer');
+    return this.annotationManager.projectorFor(layer, wrapper.dataset.tabId);
+  }
+
   /**
    * Create text box at position
    */
   createTextBox(annotationLayer, x, y, tabId) {
     // Remove any existing empty text box before creating a new one
-    if (this.activeTextBox) {
-      const text = this.activeTextBox.textContent.trim();
-      if (text.length === 0) {
-        this.activeTextBox.remove();
-        this.toolbar.classList.remove('visible');
-      }
-    }
-    
+    if (this.activeWrapper) this.removeIfEmpty(this.activeWrapper);
+
     // Prevent multiple rapid creations
     if (this.isCreatingTextBox) {
       return null;
     }
-    
+
     this.isCreatingTextBox = true;
-    
-    // Create text box wrapper
-    const wrapper = document.createElement('div');
-    wrapper.className = 'text-annotation-wrapper';
-    wrapper.style.position = 'absolute';
-    wrapper.style.left = `${x}px`;
-    wrapper.style.top = `${y}px`;
-    wrapper.style.minWidth = '100px';
-    wrapper.style.maxWidth = '400px';
-    wrapper.dataset.tabId = tabId;
-    wrapper.dataset.page = annotationLayer.dataset.page;
-    
-    // Create drag handle (left)
-    const dragHandle = document.createElement('div');
-    dragHandle.className = 'text-drag-handle';
-    dragHandle.innerHTML = '⋮⋮';
-    dragHandle.title = 'Drag to move';
-    
-    // Create text input
-    const textBox = document.createElement('div');
-    textBox.className = 'text-annotation';
-    textBox.contentEditable = true;
-    textBox.style.minHeight = '30px';
-    textBox.style.flex = '1';
-    
-    // Create resize handle (right)
-    const resizeHandle = document.createElement('div');
-    resizeHandle.className = 'text-resize-handle';
-    resizeHandle.innerHTML = '⋮';
-    resizeHandle.title = 'Drag to resize';
-    
-    // Apply current format
-    this.applyFormatToElement(textBox);
-    
-    // Add placeholder
-    textBox.setAttribute('data-placeholder', 'Start typing here...');
-    
-    // Assemble the wrapper
-    wrapper.appendChild(dragHandle);
-    wrapper.appendChild(textBox);
-    wrapper.appendChild(resizeHandle);
-    
-    // Add to annotation layer
-    annotationLayer.appendChild(wrapper);
-    
-    // Setup text box events
-    this.setupTextBoxEvents(textBox, wrapper);
-    
-    // Setup drag functionality
-    this.setupDragHandle(dragHandle, wrapper, annotationLayer);
-    
-    // Setup resize functionality
-    this.setupResizeHandle(resizeHandle, wrapper);
-    
+
+    const projector = this.annotationManager.projectorFor(annotationLayer, tabId);
+    const { w, h } = projector.pageSize();
+    const item = this.annotationManager.storeFor(tabId).add({
+      kind: 'text',
+      page: parseInt(annotationLayer.dataset.page),
+      rect: { nx: x / w, ny: y / h, nw: 100 / w },
+      text: '',
+      format: { ...this.currentFormat }
+    });
+
+    const textBox = this.mount(annotationLayer, item, projector);
+
     // Set as active and focus immediately for typing
     this.activeTextBox = textBox;
-    this.activeWrapper = wrapper;
-    
+    this.activeWrapper = textBox.closest('.text-annotation-wrapper');
+
     // Force focus after a tiny delay to ensure DOM is ready
     setTimeout(() => {
       textBox.focus();
@@ -229,40 +193,165 @@ export class TextTool {
       sel.removeAllRanges();
       sel.addRange(range);
     }, 10);
-    
+
     // Show toolbar immediately after text box is added to DOM
     requestAnimationFrame(() => {
       this.showToolbar(textBox);
       this.isCreatingTextBox = false;
     });
-    
+
     return textBox;
+  }
+
+  /**
+   * Rebuild a text box from its store item and attach it to the page's layer.
+   */
+  mount(annotationLayer, item, projector) {
+    const { w } = projector.pageSize();
+    const anchor = projector.toScreenPoint({ nx: item.rect.nx, ny: item.rect.ny });
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'text-annotation-wrapper';
+    wrapper.style.position = 'absolute';
+    wrapper.style.left = `${anchor.x}px`;
+    wrapper.style.top = `${anchor.y}px`;
+    wrapper.style.width = `${item.rect.nw * w}px`;
+    wrapper.style.minWidth = '100px';
+    wrapper.style.maxWidth = `${item.rect.nw * w}px`;
+    wrapper.dataset.annotationId = item.id;
+    wrapper.dataset.tabId = annotationLayer.dataset.tab;
+    wrapper.dataset.page = annotationLayer.dataset.page;
+
+    // Create drag handle (left)
+    const dragHandle = document.createElement('div');
+    dragHandle.className = 'text-drag-handle';
+    dragHandle.innerHTML = '⋮⋮';
+    dragHandle.title = 'Drag to move';
+
+    // Create text input
+    const textBox = document.createElement('div');
+    textBox.className = 'text-annotation';
+    textBox.contentEditable = true;
+    textBox.style.minHeight = '30px';
+    textBox.style.flex = '1';
+    textBox.innerText = item.text || '';
+    this.applyFormatToElement(textBox, item.format);
+
+    // Create resize handle (right)
+    const resizeHandle = document.createElement('div');
+    resizeHandle.className = 'text-resize-handle';
+    resizeHandle.innerHTML = '⋮';
+    resizeHandle.title = 'Drag to resize';
+
+    // Add placeholder
+    textBox.setAttribute('data-placeholder', 'Start typing here...');
+
+    // Assemble the wrapper
+    wrapper.appendChild(dragHandle);
+    wrapper.appendChild(textBox);
+    wrapper.appendChild(resizeHandle);
+
+    // Add to annotation layer
+    annotationLayer.appendChild(wrapper);
+
+    this.setupTextBoxEvents(textBox, wrapper);
+    this.setupDragHandle(dragHandle, wrapper);
+    this.setupResizeHandle(resizeHandle, wrapper);
+
+    return textBox;
+  }
+
+  /**
+   * Reposition every mounted box after a zoom/rotate/layout change. The
+   * wrappers are not recreated any more, so their pixel offsets are stale.
+   */
+  reflowForTab(tabId) {
+    const pages = this.annotationManager.app?.pdfRenderer?.pageElements?.get(tabId);
+    if (!pages) return;
+
+    for (const pageEl of pages) {
+      const layer = pageEl.querySelector('.annotation-layer');
+      if (!layer) continue;
+
+      const projector = this.annotationManager.projectorFor(layer, tabId);
+      const { w } = projector.pageSize();
+
+      layer.querySelectorAll('.text-annotation-wrapper').forEach(wrapper => {
+        const item = this.itemFor(wrapper);
+        if (!item) return;
+        const anchor = projector.toScreenPoint({ nx: item.rect.nx, ny: item.rect.ny });
+        wrapper.style.left = `${anchor.x}px`;
+        wrapper.style.top = `${anchor.y}px`;
+        wrapper.style.width = `${item.rect.nw * w}px`;
+        wrapper.style.maxWidth = `${item.rect.nw * w}px`;
+      });
+    }
+  }
+
+  /**
+   * Push the active box's live DOM state (text, position, size) into the store.
+   */
+  flushActive() {
+    const wrapper = this.activeWrapper;
+    if (!wrapper || !this.activeTextBox) return;
+
+    // A re-render detached the box; its DOM no longer describes the stored rect.
+    if (!wrapper.isConnected) {
+      this.activeTextBox = null;
+      this.activeWrapper = null;
+      return;
+    }
+
+    const item = this.itemFor(wrapper);
+    if (!item) return;
+
+    const projector = this.projectorFor(wrapper);
+    const { w } = projector.pageSize();
+    const anchor = projector.toNormPoint(wrapper.offsetLeft, wrapper.offsetTop);
+
+    this.annotationManager.storeFor(wrapper.dataset.tabId).update(item.id, {
+      text: this.activeTextBox.innerText,
+      rect: { nx: anchor.nx, ny: anchor.ny, nw: wrapper.offsetWidth / w }
+    });
   }
 
   /**
    * Setup text box event listeners
    */
   setupTextBoxEvents(textBox, wrapper) {
-    // Show toolbar on focus
+    // Show toolbar on focus, with this box's own format
     textBox.addEventListener('focus', () => {
       this.activeTextBox = textBox;
       this.activeWrapper = wrapper;
+
+      const item = this.itemFor(wrapper);
+      if (item) {
+        this.currentFormat = { ...item.format };
+        this.applyFormatToElement(textBox, item.format);
+      }
+
       this.showToolbar(textBox);
       this.syncToolbarWithFormat();
     });
-    
+
     // Update on input
     textBox.addEventListener('input', () => {
-      const tabId = wrapper.dataset.tabId;
-      if (tabId && this.annotationManager.app.toolbar) {
-        this.annotationManager.markTabAsChanged(tabId);
+      const wrapperTabId = wrapper.dataset.tabId;
+      if (!wrapperTabId) return;
+
+      const item = this.itemFor(wrapper);
+      if (item) this.annotationManager.storeFor(wrapperTabId).update(item.id, { text: textBox.innerText });
+
+      if (this.annotationManager.app.toolbar) {
+        this.annotationManager.markTabAsChanged(wrapperTabId);
       }
     });
-    
+
     // Hide toolbar on blur (after a delay to allow toolbar clicks)
     textBox.addEventListener('blur', () => {
+      this.flushActive();
       setTimeout(() => {
-        if (document.activeElement !== textBox && 
+        if (document.activeElement !== textBox &&
             !this.toolbar.contains(document.activeElement)) {
           // Just hide toolbar, keep activeTextBox reference
           this.toolbar.classList.remove('visible');
@@ -274,54 +363,48 @@ export class TextTool {
   /**
    * Setup drag handle for moving text box
    */
-  setupDragHandle(dragHandle, wrapper, annotationLayer) {
+  setupDragHandle(dragHandle, wrapper) {
     let isDragging = false;
     let startX, startY, initialLeft, initialTop;
-    
+
     dragHandle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       e.stopPropagation();
       isDragging = true;
-      
+
       startX = e.clientX;
       startY = e.clientY;
-      
-      const rect = wrapper.getBoundingClientRect();
-      const layerRect = annotationLayer.getBoundingClientRect();
-      
-      initialLeft = rect.left - layerRect.left;
-      initialTop = rect.top - layerRect.top;
-      
+      // The annotation layer is the offsetParent, so offsetLeft/Top are already layer coords.
+      initialLeft = wrapper.offsetLeft;
+      initialTop = wrapper.offsetTop;
+
       dragHandle.style.cursor = 'grabbing';
-      
+
       const onMouseMove = (e) => {
         if (!isDragging) return;
-        
-        const deltaX = e.clientX - startX;
-        const deltaY = e.clientY - startY;
-        
-        wrapper.style.left = `${initialLeft + deltaX}px`;
-        wrapper.style.top = `${initialTop + deltaY}px`;
-        
+
+        wrapper.style.left = `${initialLeft + (e.clientX - startX)}px`;
+        wrapper.style.top = `${initialTop + (e.clientY - startY)}px`;
+
         // Update toolbar position if visible
         if (this.toolbar.classList.contains('visible')) {
           this.showToolbar(wrapper.querySelector('.text-annotation'));
         }
       };
-      
+
       const onMouseUp = () => {
         isDragging = false;
         dragHandle.style.cursor = 'grab';
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
-        
-        // Mark as changed
+
+        this.flushActive();
         const tabId = wrapper.dataset.tabId;
         if (tabId) {
           this.annotationManager.markTabAsChanged(tabId);
         }
       };
-      
+
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
     });
@@ -333,45 +416,44 @@ export class TextTool {
   setupResizeHandle(resizeHandle, wrapper) {
     let isResizing = false;
     let startX, initialWidth;
-    
+
     resizeHandle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       e.stopPropagation();
       isResizing = true;
-      
+
       startX = e.clientX;
       initialWidth = wrapper.offsetWidth;
-      
+
       resizeHandle.style.cursor = 'ew-resize';
-      
+
       const onMouseMove = (e) => {
         if (!isResizing) return;
-        
-        const deltaX = e.clientX - startX;
-        const newWidth = Math.max(100, Math.min(600, initialWidth + deltaX));
-        
+
+        const newWidth = Math.max(100, Math.min(600, initialWidth + (e.clientX - startX)));
+
         wrapper.style.width = `${newWidth}px`;
         wrapper.style.maxWidth = `${newWidth}px`;
-        
+
         // Update toolbar position if visible
         if (this.toolbar.classList.contains('visible')) {
           this.showToolbar(wrapper.querySelector('.text-annotation'));
         }
       };
-      
+
       const onMouseUp = () => {
         isResizing = false;
         resizeHandle.style.cursor = 'ew-resize';
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
-        
-        // Mark as changed
+
+        this.flushActive();
         const tabId = wrapper.dataset.tabId;
         if (tabId) {
           this.annotationManager.markTabAsChanged(tabId);
         }
       };
-      
+
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
     });
@@ -382,17 +464,23 @@ export class TextTool {
    */
   applyFormat() {
     if (!this.activeTextBox) return;
-    this.applyFormatToElement(this.activeTextBox);
+    this.applyFormatToElement(this.activeTextBox, this.currentFormat);
+
+    const item = this.itemFor(this.activeWrapper);
+    if (item) {
+      this.annotationManager.storeFor(this.activeWrapper.dataset.tabId)
+        .update(item.id, { format: { ...this.currentFormat } });
+    }
   }
 
   /**
    * Apply format to a specific element
    */
-  applyFormatToElement(element) {
+  applyFormatToElement(element, format) {
     element.style.fontFamily = 'Arial';
-    element.style.fontSize = `${this.currentFormat.fontSize}px`;
-    element.style.color = this.currentFormat.color;
-    element.style.letterSpacing = `${this.currentFormat.letterSpacing}px`;
+    element.style.fontSize = `${format.fontSize}px`;
+    element.style.color = format.color;
+    element.style.letterSpacing = `${format.letterSpacing}px`;
     // Don't set border/background inline - let CSS handle it based on :focus and :empty states
     element.style.padding = '4px 8px';
     element.style.borderRadius = '2px';
@@ -402,20 +490,25 @@ export class TextTool {
     element.style.pointerEvents = 'all';
   }
 
+  /** Drop a box from the DOM and the store, so it can't come back on re-render. */
+  removeBox(wrapper) {
+    const item = this.itemFor(wrapper);
+    if (item) this.annotationManager.storeFor(wrapper.dataset.tabId).remove(item.id);
+    wrapper.remove();
+  }
+
+  removeIfEmpty(wrapper) {
+    const textBox = wrapper?.querySelector('.text-annotation');
+    if (textBox && textBox.innerText.trim().length === 0) this.removeBox(wrapper);
+  }
+
   /**
    * Remove empty text box (called when switching tools)
    */
   removeEmptyTextBox() {
-    if (this.activeTextBox) {
-      const text = this.activeTextBox.textContent.trim();
-      if (text.length === 0) {
-        // Remove the wrapper instead of just the text box
-        const wrapper = this.activeTextBox.closest('.text-annotation-wrapper');
-        if (wrapper) {
-          wrapper.remove();
-        } else {
-          this.activeTextBox.remove();
-        }
+    if (this.activeWrapper) {
+      this.removeIfEmpty(this.activeWrapper);
+      if (!this.activeWrapper.isConnected) {
         this.activeTextBox = null;
         this.activeWrapper = null;
       }
@@ -479,42 +572,18 @@ export class TextTool {
    * Delete active text box
    */
   deleteActiveTextBox() {
-    if (!this.activeTextBox) return;
-    
-    const wrapper = this.activeTextBox.closest('.text-annotation-wrapper');
-    const tabId = wrapper ? wrapper.dataset.tabId : null;
-    
-    if (wrapper) {
-      wrapper.remove();
-    } else {
-      this.activeTextBox.remove();
-    }
-    
+    const wrapper = this.activeWrapper;
+    if (!wrapper) return;
+
+    const tabId = wrapper.dataset.tabId;
+    this.removeBox(wrapper);
+
     this.activeTextBox = null;
     this.activeWrapper = null;
     this.hideToolbar();
-    
+
     if (tabId) {
       this.annotationManager.markTabAsChanged(tabId);
-    }
-  }
-
-  /**
-   * Convert hex color to rgba
-   */
-  hexToRgba(hex, alpha) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
-
-  /**
-   * Clean up
-   */
-  destroy() {
-    if (this.toolbar) {
-      this.toolbar.remove();
     }
   }
 }

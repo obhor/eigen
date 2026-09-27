@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "electron": "electron .",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\""
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "check": "node check-annotations.mjs && node check-export-roundtrip.mjs && node check-rag-client.mjs"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
