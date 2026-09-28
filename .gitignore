@@ -27,3 +27,4 @@ out/
 !electron/
 !src/
 .vercel
+.env*

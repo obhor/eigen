@@ -99,13 +99,11 @@ export class AIChatPanel {
 
       let sources = [];
       let warnings = [];
-      let mock = false;
 
       for await (const { event, data } of this.app.ragManager.queryStream(text, 5, tab.id, ctrl.signal, history)) {
         if (seq !== s.seq) return;
         if (event === 'sources') {
           sources = Array.isArray(data.sources) ? data.sources : [];
-          mock = !!data.mock;
         } else if (event === 'delta') {
           if (!pending.streaming) {
             pending.streaming = true;
@@ -128,7 +126,6 @@ export class AIChatPanel {
         text: answer,
         sources,
         warnings,
-        mock,
         ungrounded: answer.trimStart().startsWith(UNGROUNDED),
       });
     } catch (err) {
@@ -150,19 +147,22 @@ export class AIChatPanel {
     const pdfDoc = this.app?.pdfRenderer?.getDocument?.(tab.id);
     if (!pdfDoc) throw new Error('This tab has no PDF loaded.');
 
-    const pages = pdfDoc.numPages === 1 ? '1 page' : `${pdfDoc.numPages} pages`;
-    const pending = { role: 'status', text: `Indexing ${pages}… (first ask only)` };
+    const pending = { role: 'status', text: 'Reading the document…' };
     s.state = 'ingesting';
     s.msgs.push(pending);
     this._render();
 
-    const data = await pdfDoc.getData();
-    if (seq !== s.seq) return;
-    if (!(data instanceof Uint8Array) || data.length === 0) {
-      throw new Error('Could not read the PDF bytes for indexing.');
-    }
-
-    const res = await this.app.ragManager.ingest(data, tab.name || 'document.pdf', tab.id, signal);
+    const res = await this.app.ragManager.ingest(pdfDoc, tab.id, signal, (p) => {
+      if (p.phase === 'model') {
+        const pct = p.total ? ` ${Math.round((p.loaded / p.total) * 100)}%` : '';
+        pending.text = `Loading the search model${pct}… (first time only)`;
+      } else if (p.phase === 'extract') {
+        pending.text = `Reading page ${p.done}/${p.total}…`;
+      } else if (p.phase === 'embed') {
+        pending.text = `Indexing ${p.done}/${p.total} chunks…`;
+      }
+      this._paint(pending, tab.id);
+    });
     if (seq !== s.seq) return;
 
     pending.role = 'system';
@@ -232,18 +232,13 @@ export class AIChatPanel {
     text.textContent = m.text;
     el.appendChild(text);
 
-    const badges = [];
-    if (m.ungrounded) badges.push('not in document');
-    if (m.mock) badges.push('mock');
-    if (badges.length) {
+    if (m.ungrounded) {
       const row = document.createElement('div');
       row.className = 'ai-chat-badges';
-      for (const label of badges) {
-        const badge = document.createElement('span');
-        badge.className = `ai-chat-badge${label === 'mock' ? ' mock' : ''}`;
-        badge.textContent = label;
-        row.appendChild(badge);
-      }
+      const badge = document.createElement('span');
+      badge.className = 'ai-chat-badge';
+      badge.textContent = 'not in document';
+      row.appendChild(badge);
       el.appendChild(row);
     }
 

@@ -2039,11 +2039,6 @@ body.dark-mode .ai-chat-bubble.system {
   color: #b13c38;
 }
 
-.ai-chat-badge.mock {
-  background: rgba(120, 120, 120, 0.18);
-  color: inherit;
-}
-
 .ai-chat-sources {
   display: flex;
   flex-wrap: wrap;

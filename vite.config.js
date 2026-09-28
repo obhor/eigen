@@ -15,6 +15,11 @@ export default defineConfig({
     port: 5173
   },
   optimizeDeps: {
-    include: ['pdfjs-dist']
+    include: ['pdfjs-dist'],
+    // the dep optimizer mishandles onnxruntime's wasm/.mjs asset URLs
+    exclude: ['@huggingface/transformers']
+  },
+  worker: {
+    format: 'es'   // the worker dynamic-imports ORT internals; iife cannot
   }
 });

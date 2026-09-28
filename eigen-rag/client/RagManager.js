@@ -1,36 +1,33 @@
 /**
- * RagManager.js — handles all communication with the eigen-rag server.
+ * RagManager.js — the browser-side RAG engine. Extraction, chunking, embedding
+ * and retrieval all run on the visitor's device; the only thing that leaves it
+ * is the question plus the retrieved excerpts, POSTed to the key-holder proxy
+ * (api/chat.js) which forwards to Gemini.
  *
- * API contract:
- *   POST /ingest        multipart/form-data  { file: Blob }   → { doc_id, chunk_count, message }
- *   POST /query         application/json     { doc_id, q, k } → { answer, sources, warnings, mock }
- *   POST /query/stream  application/json     { doc_id, q, k } → SSE frames:
- *        event: sources → { sources, mock }    event: delta → { text } (many)
- *        event: done    → { warnings }         event: error → { message }
- *   GET  /status                                              → { ready, version }
+ * API contract (unchanged from the server-backed version):
+ *   ingest(pdfDoc, tabId, signal, onProgress)
+ *        → { doc_id, chunk_count, page_count, ocr_pages, message }
+ *   queryStream(question, k, tabId, signal, history) → frames in arrival order:
+ *        sources → delta* → (done | error)
+ *   clearTab(tabId), getDocIdForTab(tabId)
  *
- * Errors carry a user-facing string in `.message` and the raw server body in
+ * Errors carry a user-facing string in `.message` and the raw body in
  * `.detail` (console only — never rendered). Aborts pass through as-is so the
  * caller can tell "user cancelled" from "failed".
  */
+import {
+  chunkPages, buildStore, queryIndex, buildMessages, toGeminiRequest,
+  verifyCitations, extractPageTexts, MAX_PAGES, MAX_CHUNKS,
+} from './rag/pipeline.js';
+import { embed as defaultEmbed } from './rag/embedder.js';
 
-const RAG_BASE = import.meta.env?.VITE_RAG_BASE || 'http://localhost:8000';
-// Only needed when the server sets RAG_TOKEN (.env)
-const RAG_TOKEN = import.meta.env?.VITE_RAG_TOKEN || globalThis.localStorage?.getItem('rag_token') || '';
-const AUTH_HEADERS = RAG_TOKEN ? { Authorization: `Bearer ${RAG_TOKEN}` } : {};
+const PROXY_URL = import.meta.env?.VITE_LLM_PROXY_URL || 'https://eigenpdf.com/api/chat';
+const QUERY_TIMEOUT_MS = 90_000;
+const EMBED_BATCH = 16;
 
-const INGEST_TIMEOUT_MS = 600_000;  // indexing a big scan takes minutes
-const QUERY_TIMEOUT_MS = 90_000;    // above the server's 60s LLM timeout, so its error wins
-
-const AUTH_MESSAGE = 'The AI server rejected the request — check the RAG token.';
 const FRIENDLY = {
-  400: 'The AI server rejected the request.',
-  401: AUTH_MESSAGE,
-  403: AUTH_MESSAGE,
-  404: 'Document index expired — press Send to re-index.',
-  413: 'The document is too large for the AI server.',
-  422: 'The AI server could not process this document.',
-  429: 'The AI server is busy — try again in a moment.',
+  403: 'The AI service rejected the request.',
+  429: 'The AI service is busy or out of quota — try again later.',
 };
 
 function _timeoutSignal(signal, ms) {
@@ -38,188 +35,158 @@ function _timeoutSignal(signal, ms) {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
-async function _httpError(res) {
+async function _proxyError(res) {
   const raw = await res.text().catch(() => '');
   let detail = raw;
   try {
     const parsed = JSON.parse(raw);
-    if (typeof parsed?.detail === 'string') detail = parsed.detail;
+    // our own { error: "..." } or Gemini's { error: { message } }
+    if (typeof parsed?.error === 'string') detail = parsed.error;
+    else if (typeof parsed?.error?.message === 'string') detail = parsed.error.message;
   } catch { /* not JSON — keep the raw text */ }
 
-  let message = FRIENDLY[res.status] || `The AI server returned an error (${res.status}).`;
-  // 413/422 carry a specific, human-readable reason from the server
-  // ("PDF is password-protected", "PDF has 600 pages; the limit is 500")
-  if ((res.status === 413 || res.status === 422) && detail.length <= 200) message = detail;
-
-  console.warn('[rag] server answered %d: %s', res.status, detail);
-  const err = new Error(message);
+  console.warn('[rag] proxy answered %d: %s', res.status, detail);
+  const err = new Error(FRIENDLY[res.status] || `The AI service returned an error (${res.status}).`);
   err.detail = detail;
   err.status = res.status;
   return err;
 }
 
-function _networkError(err) {
-  if (err?.name === 'AbortError') return err;   // caller cancelled — pass through
-  if (err?.name === 'TimeoutError') return new Error('The AI server did not answer in time. Try again.');
-  return new Error("Can't reach the local AI server. Is it running?");
-}
-
-// One SSE frame → { event, data }; null for frames without usable data
-function _parseFrame(frame) {
-  let event = 'message';
-  const data = [];
-  for (const line of frame.split('\n')) {
-    if (line.startsWith('event: ')) event = line.slice(7).trim();
-    else if (line.startsWith('data: ')) data.push(line.slice(6));
-  }
-  if (!data.length) return null;
+// Gemini SSE: `data: {json}` records separated by blank lines. Frames arrive
+// split anywhere, so buffer until the separator.
+async function* _sseData(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
   try {
-    return { event, data: JSON.parse(data.join('\n')) };
-  } catch {
-    return null;   // garbled frame — skip it rather than kill the stream
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const data = frame.split('\n')
+          .filter((l) => l.startsWith('data:'))
+          .map((l) => l.slice(5).trim())
+          .join('');
+        if (!data) continue;
+        try {
+          yield JSON.parse(data);
+        } catch { /* garbled record — skip it rather than kill the stream */ }
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});   // release the body when the caller stops early
   }
 }
 
 export class RagManager {
-  constructor(app) {
+  constructor(app, { embedder = null } = {}) {
     this.app = app;
-    this.ready = false;
-    // Per-tab doc ids — the only source of truth (a question must never be
+    this.embedder = embedder || defaultEmbed;   // injectable for checks
+    // Per-tab indexes — the only source of truth (a question must never be
     // answered from another tab's document)
-    this.docIdsByTabId = new Map();
+    this.docs = new Map();   // tabId → { doc_id, chunks, vectors, bm25 }
   }
 
-  // ─── Server health ────────────────────────────────────────────────────────
-
-  async checkStatus() {
-    try {
-      const res = await fetch(`${RAG_BASE}/status`, { signal: AbortSignal.timeout(5_000) });
-      const data = await res.json();
-      this.ready = data.ready === true;
-    } catch {
-      this.ready = false;
-    }
-    return this.ready;
-  }
-
-  /**
-   * Clear any cached doc id for a tab (call when a tab closes).
-   * @param {string} tabId
-   */
   clearTab(tabId) {
-    if (!tabId) return;
-    this.docIdsByTabId.delete(tabId);
+    if (tabId) this.docs.delete(tabId);
   }
 
-  /**
-   * Get the cached doc id for a tab.
-   * @param {string} tabId
-   */
   getDocIdForTab(tabId) {
-    return tabId ? (this.docIdsByTabId.get(tabId) || null) : null;
+    return tabId ? (this.docs.get(tabId)?.doc_id ?? null) : null;
   }
 
   // ─── Ingest ───────────────────────────────────────────────────────────────
 
   /**
-   * @param {Uint8Array|ArrayBuffer} pdfBytes - raw PDF data
-   * @param {string} filename
-   * @param {string|null} tabId - caches the returned doc_id for this tab
+   * @param {object} pdfDoc - an open pdf.js document
+   * @param {string|null} tabId - caches the resulting index for this tab
    * @param {AbortSignal|null} signal - caller's cancel signal
-   * @returns {Promise<{ doc_id: string, chunk_count: number, message: string }>}
+   * @param {Function|null} onProgress - { phase: 'extract'|'embed'|'model', ... }
    */
-  async ingest(pdfBytes, filename = 'document.pdf', tabId = null, signal = null) {
-    const form = new FormData();
-    form.append('file', new Blob([pdfBytes], { type: 'application/pdf' }), filename);
-
-    let res;
-    try {
-      res = await fetch(`${RAG_BASE}/ingest`, {
-        method: 'POST',
-        headers: AUTH_HEADERS,
-        body: form,
-        signal: _timeoutSignal(signal, INGEST_TIMEOUT_MS),
-      });
-    } catch (err) {
-      throw _networkError(err);
+  async ingest(pdfDoc, tabId = null, signal = null, onProgress = null) {
+    if (!pdfDoc) throw new Error('This tab has no PDF loaded.');
+    if (pdfDoc.numPages > MAX_PAGES) {
+      throw new Error(`This PDF has ${pdfDoc.numPages} pages; the limit is ${MAX_PAGES}.`);
     }
-    if (!res.ok) throw await _httpError(res);
 
-    const data = await res.json();
-    if (tabId) this.docIdsByTabId.set(tabId, data.doc_id);
-    return data;
+    const pages = await extractPageTexts(pdfDoc, { signal, onProgress });
+    const all = chunkPages(pages);
+    if (!all.length) throw new Error('This PDF has no selectable text — it looks like a scan.');
+    const chunks = all.slice(0, MAX_CHUNKS);
+
+    const vectors = [];
+    for (let i = 0; i < chunks.length; i += EMBED_BATCH) {
+      signal?.throwIfAborted();
+      const batch = chunks.slice(i, i + EMBED_BATCH).map((c) => c.text);
+      vectors.push(...await this.embedder(batch, { onProgress, signal }));
+      onProgress?.({ phase: 'embed', done: Math.min(i + EMBED_BATCH, chunks.length), total: chunks.length });
+    }
+    signal?.throwIfAborted();
+
+    const doc_id = globalThis.crypto.randomUUID();
+    if (tabId) this.docs.set(tabId, { doc_id, ...buildStore(chunks, vectors) });
+
+    const pageCount = pages.length;
+    return {
+      doc_id,
+      chunk_count: chunks.length,
+      page_count: pageCount,
+      ocr_pages: 0,   // no OCR — a scanned PDF fails above instead of guessing
+      message: all.length > chunks.length
+        ? `Indexed the first ${chunks.length} of ${all.length} chunks — the rest of this document is not searchable.`
+        : `Indexed ${chunks.length} chunks from ${pageCount} page${pageCount === 1 ? '' : 's'}.`,
+    };
   }
 
   // ─── Query ────────────────────────────────────────────────────────────────
 
   /**
-   * @param {string} question
-   * @param {number} k  - number of chunks to retrieve
-   * @param {string} tabId - the tab whose document this question is about
-   * @param {AbortSignal|null} signal - caller's cancel signal
-   * @returns {Promise<{ answer: string, sources: Array, warnings: string[], mock: boolean }>}
-   */
-  async query(question, k = 5, tabId = null, signal = null) {
-    const docId = this.getDocIdForTab(tabId);
-    if (!docId) throw new Error('This tab has no indexed document yet.');
-
-    let res;
-    try {
-      res = await fetch(`${RAG_BASE}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
-        body: JSON.stringify({ doc_id: docId, q: question, k }),
-        signal: _timeoutSignal(signal, QUERY_TIMEOUT_MS),
-      });
-    } catch (err) {
-      throw _networkError(err);
-    }
-    if (!res.ok) throw await _httpError(res);
-    return res.json();
-  }
-
-  /**
-   * The same question, streamed. Yields { event, data } frames in arrival
-   * order: sources → delta* → (done | error).
+   * The question, answered from this tab's index and streamed as
+   * { event, data } frames in arrival order: sources → delta* → (done | error).
    * @param {Array<{role: 'user'|'assistant', content: string}>} history - prior turns
    * @returns {AsyncGenerator<{ event: string, data: any }>}
    */
   async *queryStream(question, k = 5, tabId = null, signal = null, history = []) {
-    const docId = this.getDocIdForTab(tabId);
-    if (!docId) throw new Error('This tab has no indexed document yet.');
+    const doc = this.docs.get(tabId);
+    if (!doc) throw new Error('This tab has no indexed document yet.');
+
+    const [queryVec] = await this.embedder([question], { signal });
+    signal?.throwIfAborted();
+    const chunks = queryIndex(doc, queryVec, question, k);
+    yield { event: 'sources', data: { sources: chunks } };
 
     let res;
     try {
-      res = await fetch(`${RAG_BASE}/query/stream`, {
+      res = await fetch(PROXY_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
-        body: JSON.stringify({ doc_id: docId, q: question, k, history }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(toGeminiRequest(buildMessages(question, chunks, history))),
         signal: _timeoutSignal(signal, QUERY_TIMEOUT_MS),
       });
     } catch (err) {
-      throw _networkError(err);
+      if (err?.name === 'AbortError') throw err;   // caller cancelled — pass through
+      if (err?.name === 'TimeoutError') throw new Error('The AI service did not answer in time. Try again.');
+      throw new Error("Can't reach the AI service. Check your connection.");
     }
-    if (!res.ok) throw await _httpError(res);   // 401/404/422 are ordinary JSON
+    if (!res.ok) throw await _proxyError(res);
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let sep;
-        while ((sep = buf.indexOf('\n\n')) !== -1) {
-          const frame = _parseFrame(buf.slice(0, sep));
-          buf = buf.slice(sep + 2);
-          if (frame) yield frame;
-        }
+    let answer = '';
+    for await (const record of _sseData(res.body)) {
+      if (record?.error) throw new Error(String(record.error.message || 'The AI service failed.'));
+      if (record?.promptFeedback?.blockReason) {
+        throw new Error('The AI service refused to answer this question.');
       }
-    } catch (err) {
-      throw _networkError(err);            // abort / timeout mid-answer
-    } finally {
-      reader.cancel().catch(() => {});     // release the body when the caller stops early
+      const text = (record?.candidates?.[0]?.content?.parts || [])
+        .map((p) => p.text || '').join('');
+      if (!text) continue;
+      answer += text;
+      yield { event: 'delta', data: { text } };
     }
+
+    yield { event: 'done', data: { warnings: verifyCitations(answer, chunks) } };
   }
 }
