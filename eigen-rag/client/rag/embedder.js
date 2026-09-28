@@ -11,7 +11,11 @@ const MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
 
 function configure(env) {
   env.allowLocalModels = true;
-  env.localModelPath = '/models/';
+  // Electron loads dist/index.html over file://, where an absolute /models/
+  // does not resolve — the model ships next to the page there.
+  env.localModelPath = location.protocol === 'file:'
+    ? new URL('./models/', document.baseURI).href
+    : '/models/';
   env.allowRemoteModels = true;
   env.backends.onnx.wasm.numThreads = 1;
 }
