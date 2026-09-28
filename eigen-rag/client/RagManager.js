@@ -53,7 +53,8 @@ async function _proxyError(res) {
 }
 
 // Gemini SSE: `data: {json}` records separated by blank lines. Frames arrive
-// split anywhere, so buffer until the separator.
+// split anywhere, so buffer until the separator. Gemini ends lines with CRLF
+// (the SSE spec allows CR, LF or CRLF), so normalize before searching.
 async function* _sseData(body) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -62,7 +63,7 @@ async function* _sseData(body) {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      buf += decoder.decode(value, { stream: true });
+      buf = (buf + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
       let sep;
       while ((sep = buf.indexOf('\n\n')) !== -1) {
         const frame = buf.slice(0, sep);

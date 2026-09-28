@@ -46,12 +46,14 @@ function streamBody(bytes, chunkSize = 7) {
     },
   };
 }
+// Gemini separates records with CRLF blank lines, not LF — pin the real shape
+// so a parser that only looks for '\n\n' cannot pass again
 const geminiSse = (records, chunkSize = 7) => ({
   ok: true,
   status: 200,
   text: async () => '',
   body: streamBody(
-    new TextEncoder().encode(records.map((r) => `data: ${JSON.stringify(r)}\n\n`).join('')),
+    new TextEncoder().encode(records.map((r) => `data: ${JSON.stringify(r)}\r\n\r\n`).join('')),
     chunkSize,
   ),
 });
